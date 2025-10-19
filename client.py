@@ -1,14 +1,14 @@
-# client.py (версия 1.2.1)
-#!/usr/bin/env python3
+# client.py (версия 1.2.2)
+# !/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
-SFU Voice Chat Client — Версия 1.2.1
+SFU Voice Chat Client — Версия 1.2.2
 - TCP: text + room management (port 8888)
 - UDP: audio streaming (port 8889)
 - Audio: 16-bit PCM, 16kHz, mono
 - UDP packet format: [32-byte zero-padded UTF-8 name][raw PCM]
-- Push-to-Talk (PTT) на клавиши '`' (англ.) и 'ё' (рус.)
+- Push-to-Talk (PTT) на клавиши Ctrl (левый или правый)
 - Изначально микрофон ВЫКЛЮЧЕН, но PTT работает
 - /unmute — включить микрофон постоянно (PTT игнорируется)
 - /mute — выключить микрофон, PTT снова активен
@@ -56,7 +56,8 @@ udp_port = 8889
 # - "MUTED": микрофон выключен, но PTT работает
 # - "UNMUTED": микрофон включён постоянно, PTT игнорируется
 mic_state = "MUTED"  # По умолчанию — выключен, но PTT активен
-ptt_active = False   # True, когда удерживается клавиша PTT
+ptt_active = False  # True, когда удерживается клавиша PTT
+
 
 # === Инициализация аудио ===
 def init_audio():
@@ -77,6 +78,7 @@ def init_audio():
         frames_per_buffer=CHUNK
     )
 
+
 # === Завершение работы ===
 def cleanup():
     global running
@@ -94,6 +96,7 @@ def cleanup():
     if udp_sock:
         udp_sock.close()
     logger.info("Клиент остановлен")
+
 
 # === Приём текста по TCP ===
 def tcp_receive_loop():
@@ -124,6 +127,7 @@ def tcp_receive_loop():
             break
     cleanup()
 
+
 # === Приём аудио по UDP ===
 def udp_receive_loop():
     global running
@@ -139,6 +143,7 @@ def udp_receive_loop():
             if running:
                 logger.debug(f"Ошибка приёма UDP: {e}")
     udp_local.close()
+
 
 # === Отправка аудио по UDP ===
 def udp_send_loop():
@@ -162,10 +167,23 @@ def udp_send_loop():
             logger.debug(f"Ошибка отправки аудио: {e}")
         time.sleep(0.001)
 
+
 # === Мониторинг клавиш PTT ===
 def ptt_monitor():
+    """
+    Отслеживает нажатия клавиш Ctrl (левый и правый) для Push-to-Talk (PTT).
+
+    Используются имена клавиш от модуля `keyboard`:
+      - 'ctrl'        → левый Ctrl (и иногда правый, в зависимости от ОС)
+      - 'right ctrl'  → правый Ctrl (особенно на Windows)
+
+    При удержании любого из них в состоянии "MUTED" активируется передача.
+    При отпускании — передача останавливается.
+    """
     global ptt_active, mic_state, running
-    ptt_keys = {'`', 'ё'}
+    # Используем оба возможных имени для Ctrl  или только левый {'ctrl'}
+    # ptt_keys = {'ctrl', 'right ctrl'}
+    ptt_keys = {'ctrl'}
 
     while running:
         try:
@@ -182,6 +200,7 @@ def ptt_monitor():
             if running:
                 logger.debug(f"Ошибка PTT монитора: {e}")
             break
+
 
 # === Обработка пользовательского ввода ===
 def handle_user_input():
@@ -228,11 +247,12 @@ def handle_user_input():
             logger.error(f"Ошибка ввода: {e}")
             break
 
+
 # === Основная функция ===
 def main():
     global tcp_sock, udp_sock, my_name, my_room, server_ip, tcp_port, udp_port, mic_state
 
-    parser = argparse.ArgumentParser(description="SFU Voice Chat Client v1.2.1")
+    parser = argparse.ArgumentParser(description="SFU Voice Chat Client v1.2.2")
     parser.add_argument("--name", required=True, help="Ваше имя (уникальное)")
     parser.add_argument("--server", default="127.0.0.1", help="IP-адрес сервера")
     parser.add_argument("--tcp-port", type=int, default=8888, help="TCP порт сервера")
@@ -277,7 +297,7 @@ def main():
 
     print(f"📡 Подключение установлено. Сервер: {server_ip}")
     print(f"👤 Имя: {my_name} | 🏠 Комната: {my_room}")
-    print("[МИКРОФОН ВЫКЛЮЧЕН. Нажмите и удерживайте '`' или 'ё' для передачи (PTT)]")
+    print("[МИКРОФОН ВЫКЛЮЧЕН. Нажмите и удерживайте Ctrl (левый или правый) для передачи (PTT)]")
 
     # Инициализация аудио
     try:
@@ -301,6 +321,7 @@ def main():
         handle_user_input()
     except KeyboardInterrupt:
         cleanup()
+
 
 if __name__ == "__main__":
     main()
