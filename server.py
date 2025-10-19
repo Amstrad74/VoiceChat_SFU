@@ -1,9 +1,9 @@
-# Server.py Версия 1.1
+# Server.py Версия 1.2.1
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
-SFU Voice Chat Server — Версия 1.1
+SFU Voice Chat Server — Версия 1.2.1
 - UDP: audio streaming (port 8889)
 - TCP: text chat + room management (port 8888)
 - Rooms: users hear only others in the same room
@@ -89,7 +89,9 @@ def handle_tcp_client(conn, addr):
                 break
             try:
                 msg = json.loads(data.decode("utf-8"))
-                handle_tcp_message(conn, msg)
+                result = handle_tcp_message(conn, msg)
+                if result == "LEAVE":
+                    break  # штатный выход по команде
             except Exception as e:
                 logger.error(f"Ошибка обработки TCP от {user}: {e}")
                 break
@@ -103,7 +105,7 @@ def handle_tcp_client(conn, addr):
 def handle_tcp_message(conn, msg):
     with tcp_lock:
         if conn not in clients_by_tcp:
-            return
+            return None
         client = clients_by_tcp[conn]
         user = client.name
         room = client.room
@@ -124,7 +126,10 @@ def handle_tcp_message(conn, msg):
         conn.send(json.dumps({"type": "user_list", "users": users_in_room}).encode('utf-8'))
 
     elif msg_type == "leave":
-        cleanup_client(conn)
+        logger.info(f"Пользователь {user} инициировал выход")
+        return "LEAVE"
+
+    return None
 
 # === Рассылка текста по TCP ===
 def broadcast_text(room, text, exclude=None):

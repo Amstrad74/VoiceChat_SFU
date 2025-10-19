@@ -1,14 +1,18 @@
-# client.py (версия 1.1)
+# client.py (версия 1.2.1)
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
-SFU Voice Chat Client — Версия 1.1
+SFU Voice Chat Client — Версия 1.2.1
 - TCP: text + room management (port 8888)
 - UDP: audio streaming (port 8889)
 - Audio: 16-bit PCM, 16kHz, mono
 - UDP packet format: [32-byte zero-padded UTF-8 name][raw PCM]
-- Fully compatible with server.py v1.1
+- Push-to-Talk (PTT) на клавиши '`' (англ.) и 'ё' (рус.)
+- Изначально микрофон ВЫКЛЮЧЕН, но PTT работает
+- /unmute — включить микрофон постоянно (PTT игнорируется)
+- /mute — выключить микрофон, PTT снова активен
+- Fully compatible with server.py v1.1+
 """
 
 import socket
@@ -19,6 +23,7 @@ import argparse
 import logging
 import pyaudio
 import time
+import keyboard  # Для отслеживания нажатий клавиш в реальном времени
 
 # === Логирование ===
 logging.basicConfig(
@@ -46,7 +51,12 @@ my_room = ""
 server_ip = "127.0.0.1"
 tcp_port = 8888
 udp_port = 8889
-muted = False
+
+# Состояния микрофона:
+# - "MUTED": микрофон выключен, но PTT работает
+# - "UNMUTED": микрофон включён постоянно, PTT игнорируется
+mic_state = "MUTED"  # По умолчанию — выключен, но PTT активен
+ptt_active = False   # True, когда удерживается клавиша PTT
 
 # === Инициализация аудио ===
 def init_audio():
@@ -122,7 +132,8 @@ def udp_receive_loop():
     while running:
         try:
             data, _ = udp_local.recvfrom(4096)
-            if stream_out and not muted:
+            if stream_out and mic_state != "MUTED_AUDIO_ONLY":  # упрощённая логика: всегда воспроизводим
+                # Примечание: приём аудио не зависит от состояния микрофона
                 stream_out.write(data)
         except Exception as e:
             if running:
@@ -131,12 +142,18 @@ def udp_receive_loop():
 
 # === Отправка аудио по UDP ===
 def udp_send_loop():
-    global running
+    global running, mic_state, ptt_active
     while running:
         try:
-            if not muted:
+            # Определяем, передавать ли аудио
+            transmitting = False
+            if mic_state == "UNMUTED":
+                transmitting = True
+            elif ptt_active:  # работает в состоянии "MUTED"
+                transmitting = True
+
+            if transmitting:
                 audio_data = stream_in.read(CHUNK, exception_on_overflow=False)
-                # Формат: [32-byte имя][аудио]
                 name_bytes = my_name.encode("utf-8")[:32]
                 padded_name = name_bytes.ljust(32, b"\x00")
                 packet = padded_name + audio_data
@@ -145,13 +162,34 @@ def udp_send_loop():
             logger.debug(f"Ошибка отправки аудио: {e}")
         time.sleep(0.001)
 
+# === Мониторинг клавиш PTT ===
+def ptt_monitor():
+    global ptt_active, mic_state, running
+    ptt_keys = {'`', 'ё'}
+
+    while running:
+        try:
+            event = keyboard.read_event()
+            if not running:
+                break
+            if event.event_type == keyboard.KEY_DOWN and event.name in ptt_keys:
+                if mic_state == "MUTED":
+                    ptt_active = True
+            elif event.event_type == keyboard.KEY_UP and event.name in ptt_keys:
+                if mic_state == "MUTED":
+                    ptt_active = False
+        except Exception as e:
+            if running:
+                logger.debug(f"Ошибка PTT монитора: {e}")
+            break
+
 # === Обработка пользовательского ввода ===
 def handle_user_input():
     print("\nДоступные команды:")
     print("  /list          — список комнат")
     print("  /users         — участники текущей комнаты")
-    print("  /mute          — отключить микрофон")
-    print("  /unmute        — включить микрофон")
+    print("  /mute          — отключить микрофон (включить режим PTT)")
+    print("  /unmute        — включить микрофон постоянно")
     print("  /exit          — выйти из чата\n")
 
     while running:
@@ -161,15 +199,22 @@ def handle_user_input():
                 continue
 
             if user_input == "/exit":
+                try:
+                    tcp_sock.send(json.dumps({"type": "leave"}).encode("utf-8"))
+                    # Дать время на отправку (неблокирующее, но с задержкой)
+                    time.sleep(0.1)
+                except:
+                    pass  # Игнорировать ошибки отправки
                 cleanup()
                 break
             elif user_input == "/mute":
-                global muted
-                muted = True
-                print("[МИКРОФОН ВЫКЛЮЧЕН]")
+                global mic_state, ptt_active
+                mic_state = "MUTED"
+                ptt_active = False  # сбросить активность при ручном mute
+                print("[МИКРОФОН ВЫКЛЮЧЕН. Режим PTT активен]")
             elif user_input == "/unmute":
-                muted = False
-                print("[МИКРОФОН ВКЛЮЧЕН]")
+                mic_state = "UNMUTED"
+                print("[МИКРОФОН ВКЛЮЧЕН ПОСТОЯННО. PTT отключён]")
             elif user_input == "/list":
                 tcp_sock.send(json.dumps({"type": "list_rooms"}).encode("utf-8"))
             elif user_input == "/users":
@@ -185,9 +230,9 @@ def handle_user_input():
 
 # === Основная функция ===
 def main():
-    global tcp_sock, udp_sock, my_name, my_room, server_ip, tcp_port, udp_port
+    global tcp_sock, udp_sock, my_name, my_room, server_ip, tcp_port, udp_port, mic_state
 
-    parser = argparse.ArgumentParser(description="SFU Voice Chat Client v1.1")
+    parser = argparse.ArgumentParser(description="SFU Voice Chat Client v1.2.1")
     parser.add_argument("--name", required=True, help="Ваше имя (уникальное)")
     parser.add_argument("--server", default="127.0.0.1", help="IP-адрес сервера")
     parser.add_argument("--tcp-port", type=int, default=8888, help="TCP порт сервера")
@@ -232,6 +277,7 @@ def main():
 
     print(f"📡 Подключение установлено. Сервер: {server_ip}")
     print(f"👤 Имя: {my_name} | 🏠 Комната: {my_room}")
+    print("[МИКРОФОН ВЫКЛЮЧЕН. Нажмите и удерживайте '`' или 'ё' для передачи (PTT)]")
 
     # Инициализация аудио
     try:
@@ -248,6 +294,7 @@ def main():
     threading.Thread(target=tcp_receive_loop, daemon=True).start()
     threading.Thread(target=udp_receive_loop, daemon=True).start()
     threading.Thread(target=udp_send_loop, daemon=True).start()
+    threading.Thread(target=ptt_monitor, daemon=True).start()
 
     # Основной цикл ввода
     try:
