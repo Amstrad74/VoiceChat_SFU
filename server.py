@@ -1,9 +1,9 @@
-# Server.py
+# Server.py Версия 1.1
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
-SFU Voice Chat Server
+SFU Voice Chat Server — Версия 1.1
 - UDP: audio streaming (port 8889)
 - TCP: text chat + room management (port 8888)
 - Rooms: users hear only others in the same room
@@ -29,16 +29,16 @@ logger = logging.getLogger("SFU_Server")
 # === Константы ===
 TCP_PORT = 8888
 UDP_PORT = 8889
-HOST = "0.0.0.0"  # Слушать все интерфейсы (важно для внешних подключений)
+HOST = "0.0.0.0"
 
 # === Структуры данных ===
 ClientInfo = namedtuple("ClientInfo", ["name", "tcp_conn", "udp_addr", "room"])
 
-# Глобальные состояния (потокобезопасность через блокировки)
-rooms = defaultdict(set)  # room_name -> set of ClientInfo
-clients_by_tcp = {}       # tcp_conn -> ClientInfo
-clients_by_name = {}      # name -> ClientInfo
-udp_to_client = {}        # udp_addr -> ClientInfo
+# Глобальные состояния
+rooms = defaultdict(set)          # room_name -> set of ClientInfo
+clients_by_tcp = {}               # tcp_conn -> ClientInfo
+clients_by_name = {}              # name -> ClientInfo
+udp_to_client = {}                # udp_addr -> ClientInfo
 
 tcp_lock = threading.Lock()
 udp_lock = threading.Lock()
@@ -47,13 +47,18 @@ udp_lock = threading.Lock()
 def handle_tcp_client(conn, addr):
     try:
         logger.info(f"Новое TCP-подключение от {addr}")
-        # Ожидаем первое сообщение: {"type": "join", "user": "...", "room": "..."}
         data = conn.recv(1024).decode("utf-8")
         if not data:
             conn.close()
             return
 
-        msg = json.loads(data)
+        try:
+            msg = json.loads(data)
+        except json.JSONDecodeError:
+            conn.send('{"error": "Некорректный JSON"}'.encode('utf-8'))
+            conn.close()
+            return
+
         if msg.get("type") != "join":
             conn.send('{"error": "Ожидался join"}'.encode('utf-8'))
             conn.close()
@@ -64,22 +69,20 @@ def handle_tcp_client(conn, addr):
 
         with tcp_lock:
             if user in clients_by_name:
-                conn.send(json.dumps({"error": "Имя уже занято"}).encode())
+                conn.send(json.dumps({"error": "Имя уже занято"}).encode('utf-8'))
                 conn.close()
                 return
 
-            # Создаём временный ClientInfo (UDP ещё неизвестен)
+            # Создаём ClientInfo и сразу добавляем в комнату
             client = ClientInfo(name=user, tcp_conn=conn, udp_addr=None, room=room)
             clients_by_tcp[conn] = client
             clients_by_name[user] = client
+            rooms[room].add(client)  # ← КЛЮЧЕВОЕ: клиент в комнате сразу
 
         logger.info(f"Пользователь {user} присоединился к комнате {room} (TCP)")
+        conn.send(json.dumps({"status": "joined", "room": room}).encode('utf-8'))
 
-        # Отправляем подтверждение
-        conn.send(json.dumps({"status": "joined", "room": room}).encode())
-
-        # Добавим в комнату позже — после получения UDP-адреса
-        # Пока что слушаем команды
+        # Основной цикл обработки TCP-сообщений
         while True:
             data = conn.recv(1024)
             if not data:
@@ -108,18 +111,17 @@ def handle_tcp_message(conn, msg):
     msg_type = msg.get("type")
 
     if msg_type == "text":
-        # Рассылаем текст всем в комнате
         broadcast_text(room, f"{user}: {msg['payload']}", exclude=conn)
 
     elif msg_type == "list_rooms":
         with tcp_lock:
             room_list = list(rooms.keys())
-        conn.send(json.dumps({"type": "room_list", "rooms": room_list}).encode())
+        conn.send(json.dumps({"type": "room_list", "rooms": room_list}).encode('utf-8'))
 
     elif msg_type == "list_users":
         with tcp_lock:
             users_in_room = [c.name for c in rooms.get(room, [])]
-        conn.send(json.dumps({"type": "user_list", "users": users_in_room}).encode())
+        conn.send(json.dumps({"type": "user_list", "users": users_in_room}).encode('utf-8'))
 
     elif msg_type == "leave":
         cleanup_client(conn)
@@ -130,9 +132,9 @@ def broadcast_text(room, text, exclude=None):
         targets = [c.tcp_conn for c in rooms[room] if c.tcp_conn != exclude and c.tcp_conn]
         for target in targets:
             try:
-                target.send(json.dumps({"type": "text", "payload": text}).encode())
+                target.send(json.dumps({"type": "text", "payload": text}).encode('utf-8'))
             except:
-                pass  # клиент отключился
+                pass
 
 # === UDP-сервер (аудио SFU) ===
 def udp_audio_server():
@@ -142,15 +144,21 @@ def udp_audio_server():
 
     while True:
         try:
-            data, addr = udp_sock.recvfrom(4096)  # PCM фрейм
+            data, addr = udp_sock.recvfrom(4096)
+
+            if len(data) < 32:
+                continue  # недостаточно данных для имени
 
             with udp_lock:
                 if addr not in udp_to_client:
-                    # Первое UDP-сообщение → регистрируем адрес
-                    # Ищем клиента по имени (должен быть уже в TCP)
-                    # Для простоты: первые 32 байта — имя в UTF-8 с паддингом
                     raw_name = data[:32].rstrip(b'\x00').decode('utf-8', errors='ignore')
-                    if raw_name in clients_by_name:
+                    if not raw_name or len(raw_name) > 32:
+                        continue
+
+                    with tcp_lock:
+                        if raw_name not in clients_by_name:
+                            continue
+
                         old = clients_by_name[raw_name]
                         new_client = ClientInfo(
                             name=old.name,
@@ -159,23 +167,22 @@ def udp_audio_server():
                             room=old.room
                         )
                         # Обновляем все ссылки
-                        with tcp_lock:
-                            clients_by_tcp[old.tcp_conn] = new_client
-                            clients_by_name[raw_name] = new_client
-                            rooms[old.room].discard(old)
-                            rooms[old.room].add(new_client)
-                        udp_to_client[addr] = new_client
-                        logger.info(f"UDP-адрес {addr} привязан к {raw_name}")
-                        audio_data = data[32:]
-                    else:
-                        continue  # неизвестный клиент
+                        clients_by_tcp[old.tcp_conn] = new_client
+                        clients_by_name[raw_name] = new_client
+                        # Обновляем объект в комнате
+                        rooms[old.room].discard(old)
+                        rooms[old.room].add(new_client)
+
+                    udp_to_client[addr] = new_client
+                    logger.info(f"UDP-адрес {addr} привязан к {raw_name}")
+                    audio_data = data[32:]
                 else:
                     audio_data = data
 
                 client = udp_to_client[addr]
                 room = client.room
 
-                # SFU: пересылаем аудио всем в комнате, кроме отправителя
+                # SFU: пересылка аудио всем в комнате, кроме отправителя
                 for other in rooms[room]:
                     if other.udp_addr and other.udp_addr != addr:
                         try:
@@ -200,11 +207,10 @@ def cleanup_client(tcp_conn):
         if not rooms[room]:
             del rooms[room]
 
-        # Удаляем из всех маппингов
+        # Удаляем из маппингов
         clients_by_tcp.pop(tcp_conn, None)
         clients_by_name.pop(user, None)
 
-        # Закрываем TCP
         try:
             tcp_conn.close()
         except:
@@ -212,7 +218,7 @@ def cleanup_client(tcp_conn):
 
         logger.info(f"Пользователь {user} отключился")
 
-    # Удаляем UDP-связку (асинхронно)
+    # Асинхронная очистка UDP-маппинга
     def remove_udp():
         with udp_lock:
             keys_to_remove = [k for k, v in udp_to_client.items() if v.name == user]
@@ -225,14 +231,12 @@ def cleanup_client(tcp_conn):
 def main():
     logger.info("Запуск SFU-сервера...")
 
-    # TCP-сервер
     tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     tcp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     tcp_sock.bind((HOST, TCP_PORT))
     tcp_sock.listen(100)
     logger.info(f"TCP-сервер запущен на порту {TCP_PORT}")
 
-    # Запуск UDP в отдельном потоке
     threading.Thread(target=udp_audio_server, daemon=True).start()
 
     try:

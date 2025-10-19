@@ -1,14 +1,14 @@
-# Client.py
+# client.py (версия 1.1)
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
-SFU Voice Chat Client (console version)
+SFU Voice Chat Client — Версия 1.1
 - TCP: text + room management (port 8888)
 - UDP: audio streaming (port 8889)
 - Audio: 16-bit PCM, 16kHz, mono
-- Name + room sent in first TCP message
-- UDP packets: [32-byte zero-padded name][raw PCM]
+- UDP packet format: [32-byte zero-padded UTF-8 name][raw PCM]
+- Fully compatible with server.py v1.1
 """
 
 import socket
@@ -20,7 +20,7 @@ import logging
 import pyaudio
 import time
 
-# === Настройка логирования ===
+# === Логирование ===
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -28,12 +28,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("Client")
 
-# === Константы аудио ===
+# === Аудио-параметры ===
 CHUNK = 1024
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
-RATE = 16000  # 16 kHz
-AUDIO_TIMEOUT = 0.1  # сек
+RATE = 16000
 
 # === Глобальные переменные ===
 tcp_sock = None
@@ -47,10 +46,9 @@ my_room = ""
 server_ip = "127.0.0.1"
 tcp_port = 8888
 udp_port = 8889
-push_to_talk = False  # False = постоянно передаём, True = только по пробелу (не реализовано в этом варианте)
 muted = False
 
-# === Инициализация PyAudio ===
+# === Инициализация аудио ===
 def init_audio():
     global audio, stream_in, stream_out
     audio = pyaudio.PyAudio()
@@ -87,34 +85,40 @@ def cleanup():
         udp_sock.close()
     logger.info("Клиент остановлен")
 
-# === Поток приёма текста по TCP ===
+# === Приём текста по TCP ===
 def tcp_receive_loop():
     global running
     while running:
         try:
             data = tcp_sock.recv(1024)
-            if not data:
+            if not 
                 break
             msg = json.loads(data.decode("utf-8"))
-            if msg["type"] == "text":
+            if msg.get("type") == "text":
                 print(f"\n[ЧАТ] {msg['payload']}")
-            elif msg["type"] == "room_list":
+            elif msg.get("type") == "room_list":
                 print(f"\n[КОМНАТЫ] {', '.join(msg['rooms'])}")
-            elif msg["type"] == "user_list":
+            elif msg.get("type") == "user_list":
                 print(f"\n[УЧАСТНИКИ] {', '.join(msg['users'])}")
             elif "error" in msg:
                 print(f"\n[ОШИБКА] {msg['error']}")
+            elif "status" in msg and msg["status"] == "joined":
+                print(f"\n✅ Успешно подключено к комнате '{msg['room']}'")
+        except (ConnectionResetError, OSError):
+            if running:
+                print("\n[СЕРВЕР] Соединение потеряно")
+            break
         except Exception as e:
             if running:
-                logger.error(f"Ошибка TCP-приёма: {e}")
+                logger.error(f"Ошибка приёма TCP: {e}")
             break
     cleanup()
 
-# === Поток приёма аудио по UDP ===
+# === Приём аудио по UDP ===
 def udp_receive_loop():
     global running
     udp_local = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    udp_local.bind(("0.0.0.0", 0))  # любой свободный порт
+    udp_local.bind(("0.0.0.0", 0))
     while running:
         try:
             data, _ = udp_local.recvfrom(4096)
@@ -122,32 +126,33 @@ def udp_receive_loop():
                 stream_out.write(data)
         except Exception as e:
             if running:
-                logger.debug(f"Ошибка UDP-приёма: {e}")
+                logger.debug(f"Ошибка приёма UDP: {e}")
     udp_local.close()
 
-# === Поток отправки аудио по UDP ===
+# === Отправка аудио по UDP ===
 def udp_send_loop():
     global running
     while running:
         try:
             if not muted:
                 audio_data = stream_in.read(CHUNK, exception_on_overflow=False)
-                # Формируем пакет: [32-byte name][audio]
-                name_padded = my_name.encode("utf-8").ljust(32, b"\x00")[:32]
-                packet = name_padded + audio_data
+                # Формат: [32-byte имя][аудио]
+                name_bytes = my_name.encode("utf-8")[:32]
+                padded_name = name_bytes.ljust(32, b"\x00")
+                packet = padded_name + audio_data
                 udp_sock.sendto(packet, (server_ip, udp_port))
         except Exception as e:
             logger.debug(f"Ошибка отправки аудио: {e}")
-        time.sleep(0.001)  # ~1ms — достаточно для 16kHz
+        time.sleep(0.001)
 
-# === Обработка команд ввода ===
+# === Обработка пользовательского ввода ===
 def handle_user_input():
     print("\nДоступные команды:")
     print("  /list          — список комнат")
-    print("  /users         — участники комнаты")
-    print("  /mute          — выключить микрофон")
+    print("  /users         — участники текущей комнаты")
+    print("  /mute          — отключить микрофон")
     print("  /unmute        — включить микрофон")
-    print("  /exit          — выйти\n")
+    print("  /exit          — выйти из чата\n")
 
     while running:
         try:
@@ -166,13 +171,12 @@ def handle_user_input():
                 muted = False
                 print("[МИКРОФОН ВКЛЮЧЕН]")
             elif user_input == "/list":
-                tcp_sock.send(json.dumps({"type": "list_rooms"}).encode())
+                tcp_sock.send(json.dumps({"type": "list_rooms"}).encode("utf-8"))
             elif user_input == "/users":
-                tcp_sock.send(json.dumps({"type": "list_users"}).encode())
+                tcp_sock.send(json.dumps({"type": "list_users"}).encode("utf-8"))
             else:
-                # Текстовое сообщение
-                tcp_sock.send(json.dumps({"type": "text", "payload": user_input}).encode())
-        except KeyboardInterrupt:
+                tcp_sock.send(json.dumps({"type": "text", "payload": user_input}).encode("utf-8"))
+        except (EOFError, KeyboardInterrupt):
             cleanup()
             break
         except Exception as e:
@@ -183,22 +187,22 @@ def handle_user_input():
 def main():
     global tcp_sock, udp_sock, my_name, my_room, server_ip, tcp_port, udp_port
 
-    parser = argparse.ArgumentParser(description="SFU Voice Chat Client")
-    parser.add_argument("--name", required=True, help="Ваше имя")
-    parser.add_argument("--server", default="127.0.0.1", help="IP сервера")
+    parser = argparse.ArgumentParser(description="SFU Voice Chat Client v1.1")
+    parser.add_argument("--name", required=True, help="Ваше имя (уникальное)")
+    parser.add_argument("--server", default="127.0.0.1", help="IP-адрес сервера")
     parser.add_argument("--tcp-port", type=int, default=8888, help="TCP порт сервера")
     parser.add_argument("--udp-port", type=int, default=8889, help="UDP порт сервера")
     parser.add_argument("--room", default="general", help="Имя комнаты")
     args = parser.parse_args()
 
-    my_name = args.name
+    my_name = args.name.strip()
     my_room = args.room
     server_ip = args.server
     tcp_port = args.tcp_port
     udp_port = args.udp_port
 
-    if not my_name.strip():
-        print("Ошибка: имя не может быть пустым")
+    if not my_name:
+        print("❌ Ошибка: имя не может быть пустым")
         return
 
     # Подключение TCP
@@ -206,28 +210,34 @@ def main():
     try:
         tcp_sock.connect((server_ip, tcp_port))
     except Exception as e:
-        print(f"Не удалось подключиться к серверу {server_ip}:{tcp_port}: {e}")
+        print(f"❌ Не удалось подключиться к {server_ip}:{tcp_port}: {e}")
         return
 
-    # Отправка join-сообщения
+    # Отправка join-запроса
     join_msg = {"type": "join", "user": my_name, "room": my_room}
-    tcp_sock.send(json.dumps(join_msg).encode())
+    tcp_sock.send(json.dumps(join_msg).encode("utf-8"))
 
-    response = tcp_sock.recv(1024)
-    resp = json.loads(response.decode())
-    if "error" in resp:
-        print(f"Ошибка сервера: {resp['error']}")
+    # Ожидание ответа
+    try:
+        response = tcp_sock.recv(1024)
+        resp = json.loads(response.decode("utf-8"))
+        if "error" in resp:
+            print(f"❌ Ошибка сервера: {resp['error']}")
+            tcp_sock.close()
+            return
+    except Exception as e:
+        print(f"❌ Некорректный ответ от сервера: {e}")
         tcp_sock.close()
         return
 
-    print(f"✅ Подключено к комнате '{my_room}' как '{my_name}'")
-    print(f"Сервер: {server_ip}:{tcp_port} (TCP), {server_ip}:{udp_port} (UDP)")
+    print(f"📡 Подключение установлено. Сервер: {server_ip}")
+    print(f"👤 Имя: {my_name} | 🏠 Комната: {my_room}")
 
     # Инициализация аудио
     try:
         init_audio()
     except Exception as e:
-        print(f"Ошибка инициализации аудио: {e}")
+        print(f"❌ Ошибка инициализации аудио: {e}")
         tcp_sock.close()
         return
 
@@ -239,7 +249,7 @@ def main():
     threading.Thread(target=udp_receive_loop, daemon=True).start()
     threading.Thread(target=udp_send_loop, daemon=True).start()
 
-    # Основной ввод
+    # Основной цикл ввода
     try:
         handle_user_input()
     except KeyboardInterrupt:
