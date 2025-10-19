@@ -91,7 +91,7 @@ def tcp_receive_loop():
     while running:
         try:
             data = tcp_sock.recv(1024)
-            if not 
+            if not data:
                 break
             msg = json.loads(data.decode("utf-8"))
             if msg.get("type") == "text":
